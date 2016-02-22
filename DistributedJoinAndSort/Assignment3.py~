@@ -1,0 +1,273 @@
+#!/usr/bin/python2.7
+#
+# Interface for the assignment 3
+# Author: Siddharth Sujir Mohan (ASU ID: 1207654769)
+
+import psycopg2
+from multiprocessing import Pool
+import threading
+import time
+
+
+RATINGS_TABLE_NAME = 'Ratings'
+noofpartition=0
+
+def getopenconnection(user='postgres', password='xxxxxxx', dbname='ddb_assignment'):
+    return psycopg2.connect("dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'")
+
+
+# Copies Data from a file
+# Inserts them into temporary table to remove the multiple characters from the delimiter
+# Then inserts it into Ratings table 
+def loadratings(ratingstablename, ratingsfilepath, openconnection):
+	cur=openconnection.cursor()
+	try:
+		cur.execute("DROP TABLE IF EXISTS movierating")
+		cur.execute("DROP TABLE IF EXISTS ratings")
+		cur.execute('''CREATE TABLE movierating(userid int, remove1 char,movieid int,remove2 char,rating numeric,remove3 char,timestamp varchar);''')
+		cur.execute("CREATE TABLE %s(userid int,movieid int,rating numeric)"%(ratingstablename))
+	except:
+		print("Table Error")
+	openconnection.commit()
+	try:
+		cur.execute("COPY movierating from '%s' USING DELIMITERS ':'"%(ratingsfilepath))
+	except Exception as detail:
+		print("Copy Error ",detail)
+	openconnection.commit()
+	try:
+		cur.execute("insert into ratings(Select userid,movieid,rating from movierating)")
+		print("File contents successfully loaded into Ratings table!")
+	except:
+		print("cant insert ")
+	openconnection.commit()
+
+
+def deletepartition(con):
+	cur=con.cursor()
+	cur.execute("select tablename from pg_tables where tablename LIKE 'rrpartition%'")
+	rrtablename=cur.fetchall()
+	cur.execute("select tablename from pg_tables where tablename LIKE 'rangepartition%'")
+	rangetablename=cur.fetchall()
+	rrsize=len(rrtablename)-1
+	#print rangetablename[0]
+	try:
+		while rrsize>=0:
+			cur.execute("DROP TABLE %s"%(rrtablename[rrsize]))
+			print("Deleted ",rrtablename[rrsize])
+			rrsize=rrsize-1
+			con.commit()
+	except Exception as detail:
+		print(detail)
+	rangesize=len(rangetablename)-1
+	try:
+		while rangesize>=0:
+			cur.execute("DROP TABLE %s"%(rangetablename[rangesize]))
+			print("Deleted ",rangetablename[rangesize])
+			rangesize=rangesize-1 
+			con.commit()
+	except Exception as detail:
+		print(detail)
+
+#Function Called by the threads in the parellel sort function
+
+def parellelSortFunc(partition,column,outputtable,con):
+	cur=con.cursor()
+	# Sort and insert into output table
+	cur.execute("Insert INTO %s (SELECT * FROM %s order by %s)"%(outputtable,partition,column))
+	con.commit()	
+	print "Sort Completed on "+partition
+
+# Parellel Sort Function
+
+def parellelSort(inputtable,sortingcolumnname,outputtable,con):
+	cur=con.cursor()
+	partitionname=inputtable+"partition"
+	rangepart(inputtable,5,sortingcolumnname,partitionname,con)
+	i=1
+	thread_list=[]	
+	# Drop output table if it exists and create a new output table
+	cur.execute("drop table if exists %s"%(outputtable))
+        cur.execute("create table %s as (select * from %s where 1=2)"%(outputtable,inputtable))
+	# Adding serial columns to get the tuple order
+	cur.execute("ALTER TABLE %s add tupleorder SERIAL"%(outputtable))
+	# for each partition create a thread the sorts the partition
+	while(i<=5):
+		partition=partitionname+str(i)
+		t=threading.Thread(target=parellelSortFunc,args=(partition,sortingcolumnname,outputtable,con))
+		thread_list.append(t)
+		i=i+1
+
+# Starts threads
+	j=1
+	for thread in thread_list:
+		print "Thread "+str(j)+" started"
+    		thread.start()
+		j=j+1
+
+# This blocks the calling thread until the thread whose join() method is called is terminated.
+# From http://docs.python.org/2/library/threading.html#thread-objects
+	for thread in thread_list:
+    		thread.join()
+
+# Range  Partition function
+
+def rangepart(inputtablename, numberofpartitions,columnname,partitionname,openconnection):
+	global noofpartition
+	'''if noofpartition.is_integer() is False:
+		return'''
+	cur=openconnection.cursor()
+	cur.execute("select max(%s) from %s"%(columnname,inputtablename))
+	row=cur.fetchone()
+	for r in row:
+		maxvalue=r;
+	n=numberofpartitions
+	i=1
+	range=float(maxvalue)/n
+	end=float(range)
+	start=float(0)
+	# for the number of partitions given, create partitions
+	while i<=n:
+		tablename=partitionname+str(i)
+		#create_query='''CREATE TABLE'''+tablename+'''(userid int,movieid int,rating numeric);
+		
+		try:
+			cur.execute("DROP TABLE IF EXISTS %s"%(tablename))
+			openconnection.commit()
+			# Select the range of values from the table
+			cur.execute("select * into %s from %s where %s>%f AND %s<=%f"%(tablename,inputtablename,columnname,start,columnname,end))
+			openconnection.commit()
+			start=end
+			end=end+range
+		except Exception as detail:
+			print(detail)
+		i=i+1
+
+# Function called by the threads in the parellel join function
+
+def parellelJoinFunc(table1partition,table2partition,table1joincolumnname,table2joincolumnname,outputtable,con):
+	cur=con.cursor()
+
+	# to check if the join columns of the input tables have the same name 
+	if table1joincolumnname==table2joincolumnname:
+		cur.execute("Insert INTO %s (select * from %s inner join %s using (%s))"%(outputtable,table1partition,table2partition,table2joincolumnname))
+		con.commit()
+	else:
+		# join and insert the data into output table
+		cur.execute("Insert INTO %s (select * from %s inner join %s on %s=%s)"%(outputtable,table1partition,table2partition,table1joincolumnname,table2joincolumnname))
+		con.commit()
+	print "Join completed on "+table1partition+" and "+table2partition
+
+
+# Parellel Join Function
+
+def parellelJoin(inputtable1,inputtable2,table1joincolumnname,table2joincolumnname,outputtable,con):
+	cur=con.cursor()
+	table1partition=inputtable1+"partition"
+	# To Partition the input tables into specified number of partitions
+	rangepart(inputtable1,5,table1joincolumnname,table1partition,con)
+	cur.execute("DROP TABLE IF EXISTS table2")
+	cur.execute("select * into table2 from %s where %s in (select %s from %s)"%(inputtable2,table2joincolumnname,table1joincolumnname,inputtable1))
+	table2partition=inputtable2+"partition"
+	rangepart("table2",5,table2joincolumnname,table2partition,con)
+	i=1
+	
+	thread_list=[]	
+	cur.execute("drop table if exists %s"%(outputtable))
+	cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name ='%s'"%(outputtable))
+	if table1joincolumnname==table2joincolumnname:
+	# To check if the table already exists
+		if cur.fetchone()[0]!=1:
+        		cur.execute("create table %s as (select * from %s inner join %s using (%s) where 1>2)"%(outputtable,inputtable1,inputtable2,table2joincolumnname))
+			con.commit()
+	else:
+		if cur.fetchone()[0]!=1:
+        		cur.execute("create table %s as (select * from %s inner join %s on %s=%s and 1>2)"%(outputtable,inputtable1,inputtable2,table1joincolumnname,table2joincolumnname))
+			con.commit()
+	# To create multiple threads
+	while(i<=5):
+		t=threading.Thread(target=parellelJoinFunc,args=(table1partition+str(i),table2partition+str(i),table1joincolumnname,table2joincolumnname,outputtable,con))
+		thread_list.append(t)
+		i=i+1
+
+# Starts threads
+	j=1
+	for thread in thread_list:
+		print "Thread "+str(j)+" started"
+    		thread.start()	
+		j=j+1
+
+# This blocks the calling thread until the thread whose join() method is called is terminated.
+# From http://docs.python.org/2/library/threading.html#thread-objects
+	k=0	
+	for thread in thread_list:
+    		thread.join()
+
+
+
+
+
+def create_db(dbname):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    con = psycopg2.connect(user='postgres', host='localhost', password='xxxxxxx')
+    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = con.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % (dbname,))
+    count = cur.fetchone()[0]
+    if count == 0:
+        cur.execute('CREATE DATABASE %s' % (dbname,))  # Create the database
+    else:
+        print('A database named {0} already exists'.format(dbname))
+
+    # Clean up
+    cur.close()
+    con.close()
+
+def before_db_creation_middleware():
+	global DB_NAME
+	DB_NAME="ddb_assignment"
+
+
+def after_db_creation_middleware(databasename):
+	
+	pass
+
+def before_test_script_starts_middleware(openconnection, databasename):
+	pass
+
+
+if __name__ == '__main__':
+	try:
+	# Use this function to do any set up before creating the DB, if any
+		before_db_creation_middleware()
+
+		create_db(DB_NAME)
+
+		# Use this function to do any set up after creating the DB, if any
+		after_db_creation_middleware(DB_NAME)
+		
+	except Exception as detail:
+		print("OOPS! This is the error ==> ", detail)
+	
+	con=getopenconnection()
+
+	# Uncomment these Functions calls to  Run the program
+	# To load a file into database, uncomment the follwing line and change the file path and name.
+
+	#loadratings("ratings","/home/system/ratings.dat", con)
+
+
+	#  To run parellel Sort, uncomment the following line and give the appropriate argument values
+	#parellelSort("Table","SortingColumnName","OutputTable",con)
+	parellelSort("joinoutputtable","empno","outputtable",con)
+	
+ 	#  To run parellel join, uncomment the following line and give the necessary arguments
+	#parellelJoin("InputTable1","InputTable2","Table1JoinColumn","Table2JoinColumn","OutputTable",con)
+	#parellelJoin("emp","emp_details","empno","empno","joinoutputtable",con)
+

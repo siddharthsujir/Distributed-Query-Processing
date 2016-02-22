@@ -1,0 +1,41 @@
+Join Using Hadoop MapReduce
+------------------------------
+
+
+Assumptions
+--------------
+
+The following assumptions have been made
+1) HAdoop has been started
+2) Input file has been loaded into hdfs
+3) Only a single file is given as input
+
+
+Files
+-------
+
+The folder consists of 3 files 
+1) Join.java -Main class
+2) JoinMapper.java
+3) JoinReducer.java
+4) Jar file which I have generated (for your convenience)
+
+
+Steps To run the program
+-------------------------
+
+1) Load the project file (Join) into Netbeans/Eclipse
+2) Clean and Build the project
+3) The jar that has been generated will be used for running in the hadoop terminal
+
+in the terminal go to hadoop folder and use the following command
+
+bin/hadoop jar "NAME OF THE JAR GENERATED" "input file path- HDFS path" "outputput FILE PATH"
+
+Example
+---------
+bin/hadoop jar /home/system/NetBeansProjects/WordCount/dist/Join.jar hdfs://master:54310/hadoopassignment/JoinInput hdfs://master:54310/output15
+
+the output wll be generated in HDFS
+
+
